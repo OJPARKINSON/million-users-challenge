@@ -17,5 +17,7 @@ sudo -u postgres psql -qX -c "DO \$\$BEGIN CREATE ROLE feed LOGIN CREATEDB PASSW
 # build feed_seed as the feed role over a local socket
 cp -r "$ROOT/seed" /tmp/seed-build && cp "$ROOT/schema.sql" /tmp/ && chown -R postgres: /tmp/seed-build /tmp/schema.sql
 sudo -u postgres PGUSER=postgres bash /tmp/seed-build/make-seed.sh
+# built as postgres, so hand the tables (their sequences and indexes follow) to feed, or every query is denied
+sudo -u postgres psql -qX -d feed_seed -c "ALTER TABLE users OWNER TO feed" -c "ALTER TABLE posts OWNER TO feed" -c "ALTER TABLE likes OWNER TO feed"
 sudo -u postgres psql -qX -c "ALTER DATABASE feed_seed OWNER TO feed" -c "ALTER DATABASE feed_seed WITH ALLOW_CONNECTIONS false"
 bash "$ROOT/box/reset-db.sh"
