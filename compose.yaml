@@ -1,0 +1,73 @@
+# Local run of examples/go: Postgres 18 + seed + Go server, all on the host network.
+#   docker compose up --build                 # db, seed (first run ~1 min), fresh `feed` copy, server on :3000 and :3001
+#   bash test/test.sh http://127.0.0.1:3000   # the 42 checks (needs curl, jq, openssl on the host)
+#   docker compose run --rm mload             # 5k-user load test; append mload flags to change it
+# Host network on purpose: Docker's port publishing (NAT, docker-proxy, conntrack) costs a lot at many connections.
+services:
+  db:
+    image: postgres:18
+    network_mode: host
+    shm_size: 1g
+    environment: { POSTGRES_USER: feed, POSTGRES_PASSWORD: feed, POSTGRES_DB: postgres }
+    # the benchmark's Postgres config, but only listening on localhost (host network would expose it to the LAN)
+    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf, -c, listen_addresses=localhost]
+    volumes:
+      - ./box/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, feed, -d, postgres]
+      interval: 2s
+      retries: 30
+
+  # Builds feed_seed + seed/tokens.json once, then gives every `up` a fresh `feed` copy (like test/run.sh does).
+  seed:
+    build:
+      dockerfile_inline: |
+        FROM postgres:18
+        RUN apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
+    network_mode: host
+    environment: { PGHOST: 127.0.0.1, PGUSER: feed, PGPASSWORD: feed }
+    volumes: [.:/repo]
+    working_dir: /repo
+    command:
+      - bash
+      - -ec
+      - |
+        [ -f seed/tokens.json ] && psql -qXAt -d postgres -c "SELECT 1 FROM pg_database WHERE datname = 'feed_seed'" | grep -q 1 \
+          || bash seed/make-seed.sh
+        psql -qX -v ON_ERROR_STOP=1 -d postgres -c "DROP DATABASE IF EXISTS feed WITH (FORCE)" -c "CREATE DATABASE feed TEMPLATE feed_seed"
+    depends_on: { db: { condition: service_healthy } }
+
+  app:
+    build:
+      context: examples/go
+      dockerfile_inline: |
+        FROM golang:1.27.1
+        WORKDIR /app
+        COPY . .
+        RUN bash build.sh
+        CMD ["bash", "start.sh"]
+    network_mode: host
+    ulimits: { nofile: 2097152 }  # same as the benchmark's systemd unit
+    environment:
+      DATABASE_URL: postgres://feed:feed@127.0.0.1:5432/feed
+      JWT_SECRET: million-users-challenge
+      HOST: 0.0.0.0
+      PORT: 3000
+      EXTRA_PORT: 3001
+    # cpuset: "0-3"  # uncomment to give the server 4 cores, like the README's test box
+    depends_on: { seed: { condition: service_completed_successfully } }
+
+  mload:
+    image: golang:1.27.1
+    profiles: [bench]
+    network_mode: host
+    ulimits: { nofile: 1048576 }
+    volumes: [.:/repo, gocache:/root/.cache/go-build]
+    working_dir: /repo/bench/mload
+    entrypoint: [go, run, ., -tokens, /repo/seed/tokens.json, -target, "${TARGET:-127.0.0.1}", -ports, "3000,3001", -gzip, -think-scale, "2.5"]
+    command: [-users, "5000", -ramp, 60s, -hold, 2m]
+
+volumes:
+  pgdata:
+  gocache:
