@@ -1,3 +1,4 @@
+bench/mload/mload
 seed/tokens.json
 seed/tsv/
 results/
@@ -8,3 +9,8 @@ obj/
 target/
 __pycache__/
 .venv/
+# infra (OpenTofu state, secrets, logs)
+infra/.terraform/
+infra/*.tfstate*
+infra/.env
+infra/logs/
